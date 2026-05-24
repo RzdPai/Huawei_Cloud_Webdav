@@ -1,0 +1,11 @@
+{
+  "name": "huawei-webdav",
+  "version": "1.0.0",
+  "main": "webdav.js",
+  "scripts": {
+    "start": "node webdav.js"
+  },
+  "dependencies": {
+    "webdav-server": "^2.6.2"
+  }
+}
