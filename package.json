@@ -1,9 +1,9 @@
 {
   "name": "huawei-webdav",
   "version": "1.0.0",
-  "main": "webdav.js",
+  "main": "docker.js",
   "scripts": {
-    "start": "node webdav.js"
+    "start": "node docker.js"
   },
   "dependencies": {
     "webdav-server": "^2.6.2"
