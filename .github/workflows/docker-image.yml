@@ -17,5 +17,5 @@ jobs:
         password: ${{ secrets.DOCKERPWD }}
     - name: Build and Push
       run: |
-        docker build . --file Dockerfile --tag rzdpai/Huawei_Cloud_Webdav:latest
-        docker push rzdpai/Huawei_Cloud_Webdav:latest
+        docker build . --file Dockerfile --tag rzdpai/huawei_cloud_webdav:latest
+        docker push rzdpai/huawei_cloud_webdav:latest
