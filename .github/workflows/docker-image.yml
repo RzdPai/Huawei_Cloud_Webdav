@@ -3,19 +3,31 @@ name: Docker Image CI
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6.0.2
+    - uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Docker Login
-      uses: docker/login-action@v4.2.0
+      uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKERACC }}
         password: ${{ secrets.DOCKERPWD }}
-    - name: Build and Push
-      run: |
-        docker build . --file Dockerfile --tag rzdpai/huawei_cloud_webdav:latest
-        docker push rzdpai/huawei_cloud_webdav:latest
+
+    - name: Build and Push Multi-Arch
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64, linux/arm64
+        push: true
+        tags: rzdpai/huawei_cloud_webdav:latest
