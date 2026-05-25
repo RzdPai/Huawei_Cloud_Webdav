@@ -16,8 +16,10 @@ const AUTHORIZE_URL = 'https://oauth-login.cloud.huawei.com/oauth2/v3/authorize?
 const MAX_UPLOAD_SIZE = 5 * 1024 * 1024;
 const SKIP_FILES = ['.DS_Store'];
 
-const CONFIG_FILE = PATH.join(__dirname, 'users.json');
-const LOG_FILE = PATH.join(__dirname, 'webdav.log');
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+if (!FS.existsSync(DATA_DIR)) FS.mkdirSync(DATA_DIR, { recursive: true });
+const CONFIG_FILE = PATH.join(DATA_DIR, 'users.json');
+const LOG_FILE = PATH.join(DATA_DIR, 'webdav.log');
 const WEBDAV_PORT = process.env.PORT || 1900;
 const ERR_NOT_FOUND = webdav.Errors.ResourceNotFound;
 const ERR_BAD_AUTH = webdav.Errors.BadAuthentication;
