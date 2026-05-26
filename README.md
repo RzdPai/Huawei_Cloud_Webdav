@@ -80,13 +80,14 @@ node gui.js
 
 环境变量
 
-变量 说明 默认值
-PORT WebDAV 服务端口 1900
-ADMIN_PORT 管理面板端口 3000
-ADMIN_PASSWORD 管理面板登录密码 admin123
-DEBUG 开启调试日志 0
-DAEMON 后台模式运行 0
-DATA_DIR 数据存储目录 /data
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `PORT` | WebDAV 服务端口 | `1900` |
+| `ADMIN_PORT` | 管理面板端口 | `3000` |
+| `ADMIN_PASSWORD` | 管理面板登录密码 | `admin123` |
+| `DEBUG` | 开启调试日志 | `0` |
+| `DAEMON` | 后台模式运行 | `0` |
+| `DATA_DIR` | 数据存储目录 | `/data` |
 
 首次使用
 
@@ -142,11 +143,12 @@ node cli.js
 
 CLI 支持的命令：
 
-命令 说明
-start 启动 WebDAV 服务
-stop 停止 WebDAV 服务
-status 查看服务状态和用量
-user add 交互式添加用户
-user del 删除用户
-user list 列出所有用户
-exit 退出程序
+| 命令 | 说明 |
+|------|------|
+| `start` | 启动 WebDAV 服务 |
+| `stop` | 停止 WebDAV 服务 |
+| `status` | 查看服务状态和用量 |
+| `user add` | 交互式添加用户 |
+| `user del` | 删除用户 |
+| `user list` | 列出所有用户 |
+| `exit` | 退出程序 |
