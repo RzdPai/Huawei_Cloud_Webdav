@@ -6,10 +6,10 @@ COPY package*.json ./
 
 RUN npm install --production
 
-COPY docker.js ./
+COPY gui.js ./
 
 EXPOSE 1900
 
 ENV PORT=1900
 
-CMD ["node", "docker.js"]
+CMD ["node", "gui.js"]

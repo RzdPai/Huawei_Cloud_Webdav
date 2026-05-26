@@ -5,8 +5,10 @@ const QS = require('querystring');
 const READLINE = require('readline');
 const OS = require('os');
 const { Writable } = require('stream');
-const util = require('util');
 const webdav = require('webdav-server').v2;
+const express = require('express');
+const session = require('express-session');
+const bodyParser = require('body-parser');
 
 const CLIENT_ID = '117755925';
 const CLIENT_SECRET = 'ba95fc3b100404e22043431a7fca19ea916fe38597f121bfa7908f02ffe1199a';
@@ -16,11 +18,11 @@ const AUTHORIZE_URL = 'https://oauth-login.cloud.huawei.com/oauth2/v3/authorize?
 const MAX_UPLOAD_SIZE = 5 * 1024 * 1024;
 const SKIP_FILES = ['.DS_Store'];
 
-const DATA_DIR = process.env.DATA_DIR || __dirname;
-if (!FS.existsSync(DATA_DIR)) FS.mkdirSync(DATA_DIR, { recursive: true });
-const CONFIG_FILE = PATH.join(DATA_DIR, 'users.json');
-const LOG_FILE = PATH.join(DATA_DIR, 'webdav.log');
+const CONFIG_FILE = PATH.join(__dirname, 'users.json');
+const LOG_FILE = PATH.join(__dirname, 'webdav.log');
 const WEBDAV_PORT = process.env.PORT || 1900;
+const ADMIN_PORT = process.env.ADMIN_PORT || 3000;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const ERR_NOT_FOUND = webdav.Errors.ResourceNotFound;
 const ERR_BAD_AUTH = webdav.Errors.BadAuthentication;
 const DEBUG = process.env.DEBUG === '1';
@@ -381,51 +383,163 @@ async function startServer() {
     serverInstance.afterRequest((ctx, next) => { log(`RES ${ctx.request.method} ${ctx.request.url} -> ${ctx.response.statusCode}`); next(); });
     await new Promise(r => serverInstance.start(WEBDAV_PORT, r));
     isRunning = true;
-    console.log(`WebDAV Server started on port ${WEBDAV_PORT}`);
+    console.log(`WebDAV Server started`);
 }
 
 async function stopServer() { if (!isRunning || !serverInstance) return; await new Promise(r => serverInstance.stop(r)); isRunning = false; serverInstance = null; console.log('WebDAV Server stopped'); }
 async function updateAllHuaweiInfo() { for (let u of usersConfig) { try { const info = await getHuaweiUserInfo(u.token.access_token); if (!info.error) u.huawei = info; } catch (e) {} } saveConfig(); }
 
-async function panel() {
+const adminApp = express();
+adminApp.use(bodyParser.urlencoded({ extended: true }));
+adminApp.use(bodyParser.json());
+adminApp.use(session({ secret: 'webdav-admin-secret', resave: false, saveUninitialized: false, cookie: { maxAge: 3600000 } }));
+
+function requireLogin(req, res, next) {
+    if (req.session.loggedIn) return next();
+    if (req.path === '/login') return next();
+    res.redirect('/login');
+}
+
+adminApp.get('/login', (req, res) => {
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录</title><style>body{font-family:sans-serif;padding:1rem;max-width:400px;margin:0 auto;background:#f5f5f5}div{background:white;padding:2rem;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1)}input{width:100%;padding:12px;margin:8px 0;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}button{width:100%;padding:12px;background:#007bff;color:white;border:none;border-radius:4px;font-size:16px;cursor:pointer}h2{margin-top:0}</style></head><body><div><h2>管理后台登录</h2><form method="post" action="/login"><input type="password" name="password" placeholder="密码" required /><button type="submit">登录</button></form></div></body></html>`);
+});
+adminApp.post('/login', (req, res) => {
+    if (req.body.password === ADMIN_PASSWORD) {
+        req.session.loggedIn = true;
+        res.redirect('/');
+    } else {
+        res.send('<script>alert("密码错误");location.href="/login";</script>');
+    }
+});
+adminApp.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/login'); });
+
+adminApp.get('/', requireLogin, (req, res) => {
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=yes"><title>华为云盘 WebDAV 管理</title><style>*{box-sizing:border-box}body{font-family:sans-serif;padding:1rem;margin:0;background:#f5f5f5;color:#333}.container{max-width:800px;margin:0 auto}h1{font-size:1.5rem;margin:0 0 0.5rem 0}.info-card{background:white;padding:1rem;border-radius:8px;margin-bottom:1rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)}.service-status{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-top:0.5rem}.status-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:0.85rem;font-weight:bold}.status-running{background:#d4edda;color:#155724}.status-stopped{background:#f8d7da;color:#721c24}.service-btn{padding:6px 12px;border:none;border-radius:4px;cursor:pointer;font-size:0.85rem}.service-start{background:#28a745;color:white}.service-stop{background:#dc3545;color:white}table{width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1)}th,td{padding:12px 8px;text-align:left;border-bottom:1px solid #ddd}th{background:#f2f2f2;font-weight:600}.actions button{margin-right:8px;padding:6px 12px;border:none;border-radius:4px;cursor:pointer;font-size:0.8rem}.delete-btn{background:#dc3545;color:white}.refresh-btn{background:#28a745;color:white}.add-card{background:white;padding:1rem;border-radius:8px;margin-top:1rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)}.add-card h3{margin-top:0;font-size:1.2rem}.form-group{margin-bottom:1rem}label{display:block;font-weight:600;margin-bottom:0.3rem}input{width:100%;padding:10px;border:1px solid #ddd;border-radius:4px;font-size:1rem}.help-text{font-size:0.8rem;color:#666;margin-top:0.2rem}.btn-primary{background:#007bff;color:white;padding:10px 16px;border:none;border-radius:4px;cursor:pointer;width:100%;font-size:1rem}.btn-secondary{background:#28a745;color:white;padding:10px 16px;border:none;border-radius:4px;cursor:pointer;width:100%;font-size:1rem;margin-bottom:0.5rem}.status{padding:10px;margin-top:0.5rem;border-radius:4px;display:none}.status.error{background:#f8d7da;color:#721c24;display:block}.status.success{background:#d4edda;color:#155724;display:block}.logout-btn{background:#6c757d;color:white;padding:6px 12px;border:none;border-radius:4px;cursor:pointer;font-size:0.85rem;text-decoration:none;display:inline-block}.logout-btn:hover{background:#5a6268}@media (max-width:600px){th,td{font-size:0.8rem;padding:8px 4px}.actions button{padding:4px 8px;font-size:0.7rem}}</style></head><body><div class="container"><div class="info-card"><h1>华为云盘 WebDAV</h1><div class="service-status"><span>WebDAV服务状态：</span><span id="serviceStatus" class="status-badge">加载中...</span><button id="startServiceBtn" class="service-btn service-start">启动服务</button><button id="stopServiceBtn" class="service-btn service-stop">停止服务</button><button id="logoutBtn" class="logout-btn">退出登录</button></div></div><h2>用户列表</h2><table id="userTable"><thead><tr><th>用户名</th><th>华为账号</th><th>存储用量</th><th>操作</th></tr></thead><tbody><tr><td colspan="4">加载中...</tr></tbody></table><div class="add-card"><h3>添加用户</h3><div class="form-group"><label>WebDAV 用户名</label><input type="text" id="webdavUsername" placeholder="例如: mycloud" autocomplete="off"></div><div class="form-group"><label>WebDAV 密码</label><input type="password" id="webdavPassword" placeholder="用于 WebDAV 登录"></div><div class="form-group"><label>华为授权码 (code)</label><input type="text" id="authCode" placeholder="从授权页面复制 code"><div class="help-text">点击下方按钮获取授权码，授权成功后复制地址栏中的 code= 后面的参数</div></div><button id="getCodeBtn" class="btn-secondary">获取授权码</button><button id="addBtn" class="btn-primary">添加用户</button><div id="addStatus" class="status"></div></div></div><script>function showStatus(msg,isError){const div=document.getElementById('addStatus');div.textContent=msg;div.className='status '+(isError?'error':'success');setTimeout(()=>{div.style.display='none';div.className='status';},8000);div.style.display='block';}async function loadUsers(){try{const resp=await fetch('/api/users');if(!resp.ok)throw new Error();const users=await resp.json();const tbody=document.querySelector('#userTable tbody');tbody.innerHTML='';if(users.length===0){tbody.innerHTML='<tr><td colspan="4">暂无用户</td></tr>';return;}for(const u of users){const row=tbody.insertRow();row.insertCell(0).textContent=u.username;row.insertCell(1).textContent=u.huawei?.user?.displayName||u.huawei?.user?.account||'未知';const quota=u.huawei?.storageQuota||{};const used=((quota.usedSpace||0)/1e9).toFixed(2);const total=((quota.userCapacity||0)/1e9).toFixed(2);row.insertCell(2).textContent=total?\`\${used}GB / \${total}GB\`:'--';const actionCell=row.insertCell(3);const delBtn=document.createElement('button');delBtn.textContent='删除';delBtn.className='delete-btn';delBtn.style.marginRight='8px';delBtn.onclick=async()=>{if(confirm(\`删除用户 "\${u.username}"？文件仍在华为云盘。\`)){await fetch(\`/api/users/\${encodeURIComponent(u.username)}\`,{method:'DELETE'});loadUsers();}};const refreshBtn=document.createElement('button');refreshBtn.textContent='刷新Token';refreshBtn.className='refresh-btn';refreshBtn.onclick=async()=>{const resp=await fetch(\`/api/users/\${encodeURIComponent(u.username)}/refresh\`,{method:'POST'});const data=await resp.json();alert(data.message||(data.success?'刷新成功':'刷新失败'));loadUsers();};actionCell.appendChild(delBtn);actionCell.appendChild(refreshBtn);}}catch(e){document.querySelector('#userTable tbody').innerHTML='<tr><td colspan="4">加载失败</td></tr>';}}async function updateServiceStatus(){try{const resp=await fetch('/api/status');const data=await resp.json();const statusSpan=document.getElementById('serviceStatus');if(data.running){statusSpan.textContent='运行中';statusSpan.className='status-badge status-running';}else{statusSpan.textContent='已停止';statusSpan.className='status-badge status-stopped';}}catch(e){console.error(e);}}document.getElementById('startServiceBtn').onclick=async()=>{try{const resp=await fetch('/api/start',{method:'POST'});const data=await resp.json();if(data.success){updateServiceStatus();showStatus('WebDAV服务启动成功','success');}else{showStatus('启动失败: '+data.error,'error');}}catch(e){showStatus('请求失败','error');}};document.getElementById('stopServiceBtn').onclick=async()=>{try{const resp=await fetch('/api/stop',{method:'POST'});const data=await resp.json();if(data.success){updateServiceStatus();showStatus('WebDAV服务已停止','success');}else{showStatus('停止失败: '+data.error,'error');}}catch(e){showStatus('请求失败','error');}};document.getElementById('addBtn').onclick=async()=>{const username=document.getElementById('webdavUsername').value.trim();const password=document.getElementById('webdavPassword').value;const authCode=document.getElementById('authCode').value.trim();if(!username||!password||!authCode){showStatus('请完整填写用户名、密码和授权码',true);return;}try{const resp=await fetch('/api/add-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password,code:authCode})});const data=await resp.json();if(resp.ok){showStatus('用户添加成功！','success');loadUsers();document.getElementById('webdavUsername').value='';document.getElementById('webdavPassword').value='';document.getElementById('authCode').value='';}else{showStatus('失败: '+data.error,'error');}}catch(e){showStatus('网络错误: '+e.message,'error');}};document.getElementById('getCodeBtn').onclick=()=>{window.open('${AUTHORIZE_URL}', '_blank', 'width=500,height=600');};document.getElementById('logoutBtn').onclick=()=>{window.location.href='/logout';};window.addEventListener('load',()=>{loadUsers();updateServiceStatus();setInterval(updateServiceStatus,5000);});</script></body></html>`);
+});
+
+adminApp.get('/api/users', requireLogin, (req, res) => {
+    res.json(usersConfig.map(u => ({ username: u.username, huawei: u.huawei })));
+});
+adminApp.delete('/api/users/:username', requireLogin, (req, res) => {
+    const username = req.params.username;
+    const idx = usersConfig.findIndex(u => u.username === username);
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    usersConfig.splice(idx, 1);
+    saveConfig();
+    delete pathCaches[userKey(username)];
+    if (serverInstance && serverInstance.userManager) {
+        serverInstance.userManager.removeUser(username);
+        if (global._webdavUserSet) global._webdavUserSet.delete(username);
+    }
+    res.json({ success: true });
+});
+adminApp.post('/api/users/:username/refresh', requireLogin, async (req, res) => {
+    const username = req.params.username;
+    try {
+        await refreshToken(username);
+        const u = findConfigUser(username);
+        if (u && u.token) {
+            const info = await getHuaweiUserInfo(u.token.access_token);
+            u.huawei = info;
+            saveConfig();
+        }
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+adminApp.post('/api/add-user', requireLogin, async (req, res) => {
+    const { username, password, code } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    if (!code) return res.status(400).json({ error: 'Authorization code required' });
+    if (findConfigUser(username)) return res.status(400).json({ error: 'User already exists' });
+    try {
+        const postData = QS.stringify({ grant_type: 'authorization_code', code, client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI });
+        const { raw } = await httpsRequest({
+            hostname: 'oauth-login.cloud.huawei.com', port: 443, path: '/oauth2/v3/token', method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(postData, 'utf8') }
+        }, postData);
+        const result = safeJsonParse(raw);
+        if (!result.success || result.data.error) throw new Error(result.data?.error_description || 'Auth failed');
+        const tokenData = result.data;
+        const userInfo = await getHuaweiUserInfo(tokenData.access_token);
+        usersConfig.push({ username, password, token: tokenData, huawei: userInfo });
+        saveConfig();
+        if (serverInstance && serverInstance.userManager) {
+            serverInstance.userManager.addUser(username, password, false);
+            if (!global._webdavUserSet) global._webdavUserSet = new Set();
+            global._webdavUserSet.add(username);
+        }
+        if (!pathCaches[userKey(username)]) pathCaches[userKey(username)] = new Map();
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+adminApp.get('/api/status', requireLogin, (req, res) => {
+    res.json({ running: isRunning });
+});
+adminApp.post('/api/start', requireLogin, async (req, res) => {
+    try {
+        if (isRunning) return res.json({ success: true, message: 'Already running' });
+        await startServer();
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+adminApp.post('/api/stop', requireLogin, async (req, res) => {
+    try {
+        if (!isRunning) return res.json({ success: true, message: 'Already stopped' });
+        await stopServer();
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+async function startAdminServer() {
+    return new Promise((resolve) => {
+        adminApp.listen(ADMIN_PORT, () => {
+            console.log(`Admin panel started on port ${ADMIN_PORT}`);
+            resolve();
+        });
+    });
+}
+
+async function main() {
+    await startServer();
+    await startAdminServer();
+    console.log(`All services running. WebDAV port: ${WEBDAV_PORT}, Admin port: ${ADMIN_PORT}`);
+}
+
+if (!process.stdin.isTTY || process.env.DAEMON === '1') {
+    main().catch(e => { log('Start failed: ' + e.message); process.exit(1); });
+} else {
     const rl = READLINE.createInterface({ input: process.stdin, output: process.stdout });
     const ask = q => new Promise(r => rl.question(q, r));
-    while (true) {
-        const input = (await ask('webdav> ')).trim();
-        if (!input) continue;
-        const [cmd, sub] = input.split(/\s+/);
-        try {
-            if (cmd === 'start') await startServer();
-            else if (cmd === 'stop') await stopServer();
-            else if (cmd === 'status') {
-                console.log(`Running: ${isRunning}`);
-                await updateAllHuaweiInfo();
-                usersConfig.forEach(u => { console.log(`\n- ${u.username}`); if (u.huawei?.user) console.log(`  ${u.huawei.user.displayName} (${(u.huawei.storageQuota.usedSpace/1e9).toFixed(2)}GB / ${(u.huawei.storageQuota.userCapacity/1e9).toFixed(2)}GB)`); });
-            } else if (cmd === 'user' && sub === 'add') {
-                const tokenData = await authorizeNewUser(rl);
-                const infoData = await getHuaweiUserInfo(tokenData.access_token);
-                let username = (await ask('WebDAV Username: ')).trim();
-                if (findConfigUser(username)) { console.log('User exists'); continue; }
-                const password = await ask('WebDAV Password: ');
-                usersConfig.push({ username, password, token: tokenData, huawei: infoData });
-                saveConfig();
-                console.log(`User "${username}" added.`);
-                if (isRunning) { await stopServer(); await startServer(); }
-            } else if (cmd === 'user' && sub === 'del') {
-                let username = (await ask('WebDAV Username: ')).trim();
-                const before = usersConfig.length;
-                usersConfig = usersConfig.filter(u => normalizeUsername(u.username) !== normalizeUsername(username));
-                if (usersConfig.length === before) console.log('Not found');
-                else { delete pathCaches[userKey(username)]; saveConfig(); console.log('Deleted.'); if (isRunning) { await stopServer(); await startServer(); } }
-            } else if (cmd === 'user' && sub === 'list') usersConfig.forEach(u => console.log(u.username));
-            else if (cmd === 'exit') process.exit(0);
-            else console.log('Commands: start, stop, status, user add, user del, user list, exit');
-        } catch (e) { console.log('Error:', e.message); }
-    }
+    (async function() {
+        await main();
+        while (true) {
+            const input = (await ask('webdav> ')).trim();
+            if (!input) continue;
+            const [cmd, sub] = input.split(/\s+/);
+            try {
+                if (cmd === 'stop') await stopServer();
+                else if (cmd === 'start') await startServer();
+                else if (cmd === 'status') {
+                    console.log(`Running: ${isRunning}`);
+                    await updateAllHuaweiInfo();
+                    usersConfig.forEach(u => { console.log(`\n- ${u.username}`); if (u.huawei?.user) console.log(`  ${u.huawei.user.displayName} (${(u.huawei.storageQuota.usedSpace/1e9).toFixed(2)}GB / ${(u.huawei.storageQuota.userCapacity/1e9).toFixed(2)}GB)`); });
+                } else if (cmd === 'user' && sub === 'del') {
+                    let username = (await ask('WebDAV Username: ')).trim();
+                    const before = usersConfig.length;
+                    usersConfig = usersConfig.filter(u => normalizeUsername(u.username) !== normalizeUsername(username));
+                    if (usersConfig.length === before) console.log('Not found');
+                    else { delete pathCaches[userKey(username)]; saveConfig(); console.log('Deleted.'); if (isRunning) { await stopServer(); await startServer(); } }
+                } else if (cmd === 'user' && sub === 'list') usersConfig.forEach(u => console.log(u.username));
+                else if (cmd === 'exit') process.exit(0);
+                else console.log('Commands: start, stop, status, user del, user list, exit');
+            } catch (e) { console.log('Error:', e.message); }
+        }
+    })().catch(console.log);
 }
 
 process.on('uncaughtException', e => log('Uncaught: ' + e.message));
 process.on('unhandledRejection', e => log('Unhandled: ' + e));
-
-if (!process.stdin.isTTY || process.env.DAEMON === '1') startServer().catch(e => { log('Start failed: ' + e.message); process.exit(1); });
-else panel().catch(console.log);
