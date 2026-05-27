@@ -39,12 +39,15 @@ services:
     restart: unless-stopped
     ports:
       - "1900:1900"
+      - "3000:3000"
     environment:
-      - DAEMON=1
       - PORT=1900
-      - DATA_DIR=/data
+      - ADMIN_PORT=3000
+      - ADMIN_PASSWORD=admin123
+      - SESSION_SECRET=webdav-admin-secret
     volumes:
-      - ./data:/data
+      - ./data/users.json:/app/users.json
+      - ./data/webdav.log:/app/webdav.log
 ```
 
 启动服务：
