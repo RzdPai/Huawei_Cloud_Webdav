@@ -1,6 +1,7 @@
 const FS = require('fs');
 const PATH = require('path');
 const HTTPS = require('https');
+const HTTP = require('http');
 const QS = require('querystring');
 const READLINE = require('readline');
 const OS = require('os');
@@ -21,13 +22,21 @@ const LOG_FILE = PATH.join(__dirname, 'webdav.log');
 const WEBDAV_PORT = process.env.PORT || 1900;
 const ERR_NOT_FOUND = webdav.Errors.ResourceNotFound;
 const ERR_BAD_AUTH = webdav.Errors.BadAuthentication;
-const DEBUG = process.env.DEBUG === '1';
+const DEBUG = process.env.DEBUG !== '0';
+
+const keepAliveAgent = new HTTPS.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 15000,
+    maxSockets: 100,
+    maxFreeSockets: 10
+});
 
 let usersConfig = [];
 if (FS.existsSync(CONFIG_FILE)) usersConfig = JSON.parse(FS.readFileSync(CONFIG_FILE, 'utf8'));
 
 let isRunning = false;
 let serverInstance = null;
+let httpServer = null;
 const pathCaches = {};
 const refreshingTokens = {};
 
@@ -37,6 +46,9 @@ function saveConfig() { FS.writeFileSync(CONFIG_FILE, JSON.stringify(usersConfig
 function safeJsonParse(data) { try { return { success: true, data: JSON.parse(data) }; } catch (e) { return { success: false, error: e }; } }
 
 function httpsRequest(options, postData = null) {
+    if (!options.agent) {
+        options.agent = keepAliveAgent;
+    }
     return new Promise((resolve, reject) => {
         const req = HTTPS.request(options, (res) => {
             const chunks = [];
@@ -125,7 +137,6 @@ function resolveUser(ctx) {
     const configUser = findConfigUser(username);
     if (!configUser) { debug(`User "${username}" not found in config`); return null; }
     const normalized = normalizeUsername(configUser.username);
-    debug(`Resolved user: ${normalized}`);
     return normalized;
 }
 
@@ -259,14 +270,21 @@ async function updateFileMetadata(username, fileId, newName = null, newParentId 
     await apiJSON(username, 'PATCH', `/drive/v1/files/${fileId}?fields=*`, updates);
 }
 
-async function downloadAsStream(username, fileId) {
+async function downloadAsStream(username, fileId, rangeHeader = null) {
     const make = async (token) => new Promise((resolve, reject) => {
-        const req = HTTPS.request({ hostname: 'driveapis.cloud.huawei.com.cn', path: `/drive/v1/files/${fileId}?form=content`, headers: { 'Authorization': `Bearer ${token.access_token}` } }, resolve);
+        const headers = { 'Authorization': `Bearer ${token.access_token}` };
+        if (rangeHeader) headers['Range'] = rangeHeader;
+        const req = HTTPS.request({
+            hostname: 'driveapis.cloud.huawei.com.cn',
+            path: `/drive/v1/files/${fileId}?form=content`,
+            headers: headers,
+            agent: keepAliveAgent
+        }, resolve);
         req.on('error', reject);
         req.end();
     });
     const resp = await requestWithTokenRetry(username, make);
-    if (resp.statusCode !== 200) {
+    if (resp.statusCode !== 200 && resp.statusCode !== 206) {
         let err = '';
         resp.on('data', c => err += c);
         await new Promise(r => resp.on('end', r));
@@ -321,17 +339,54 @@ async function uploadStream(username, parentId, fileName, fileSize, tempFilePath
 
 class HuaweiFileSystem extends webdav.FileSystem {
     constructor() { super(); this.locks = new webdav.LocalLockManager(); this.props = new webdav.LocalPropertyManager(); }
+
+    _normalize(pObj) {
+        let p = pObj.toString();
+        try {
+            p = decodeURIComponent(p);
+        } catch (e) {}
+        p = p.replace(/^(?:\/https?:\/[^\/]+)+/i, '');
+        return p === '' ? '/' : p;
+    }
+
     _lockManager(p, ctx, cb) { cb(null, this.locks); }
     _propertyManager(p, ctx, cb) { cb(null, this.props); }
-    _type(pObj, ctx, cb) { const p = pObj.toString(); withUser(ctx, cb, async u => { if (p === '/') return webdav.ResourceType.Directory; const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; return info.mimeType === 'application/vnd.huawei-apps.folder' ? webdav.ResourceType.Directory : webdav.ResourceType.File; }); }
-    _readDir(pObj, ctx, cb) { const p = pObj.toString(), norm = p === '/' ? '/' : p.replace(/\/$/, ''); withUser(ctx, cb, async u => { const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; if (info.mimeType !== 'application/vnd.huawei-apps.folder') throw new Error('Not a directory'); const children = await listFolder(u, info.fileId); const now = Date.now(); const key = userKey(u); if (!pathCaches[key]) pathCaches[key] = new Map(); children.forEach(c => { const childPath = (norm === '/' ? '' : norm) + '/' + c.fileName; pathCaches[key].set(childPath, { fileId: c.id, mimeType: c.mimeType, size: c.size, editedTime: c.editedTime, expires: now + 60000 }); }); return children.map(c => c.fileName); }); }
-    _size(pObj, ctx, cb) { const p = pObj.toString(); withUser(ctx, cb, async u => { if (p === '/') return 0; const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; if (info.mimeType === 'application/vnd.huawei-apps.folder') return 0; if (info.size !== undefined) return info.size || 0; const fi = await getFileInfoById(u, info.fileId); return fi.size || 0; }); }
-    _lastModifiedDate(pObj, ctx, cb) { const p = pObj.toString(); withUser(ctx, cb, async u => { if (p === '/') return Date.now(); const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; if (info.editedTime) return new Date(info.editedTime).getTime(); const fi = await getFileInfoById(u, info.fileId); return new Date(fi.editedTime).getTime(); }); }
+    _type(pObj, ctx, cb) {
+        const p = this._normalize(pObj);
+        withUser(ctx, cb, async u => { if (p === '/') return webdav.ResourceType.Directory; const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; return info.mimeType === 'application/vnd.huawei-apps.folder' ? webdav.ResourceType.Directory : webdav.ResourceType.File; });
+    }
+    _readDir(pObj, ctx, cb) {
+        const p = this._normalize(pObj), norm = p === '/' ? '/' : p.replace(/\/$/, '');
+        withUser(ctx, cb, async u => { const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; if (info.mimeType !== 'application/vnd.huawei-apps.folder') throw new Error('Not a directory'); const children = await listFolder(u, info.fileId); const now = Date.now(); const key = userKey(u); if (!pathCaches[key]) pathCaches[key] = new Map(); children.forEach(c => { const childPath = (norm === '/' ? '' : norm) + '/' + c.fileName; pathCaches[key].set(childPath, { fileId: c.id, mimeType: c.mimeType, size: c.size, editedTime: c.editedTime, expires: now + 60000 }); }); return children.map(c => c.fileName); });
+    }
+    _size(pObj, ctx, cb) {
+        const p = this._normalize(pObj);
+        withUser(ctx, cb, async u => { if (p === '/') return 0; const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; if (info.mimeType === 'application/vnd.huawei-apps.folder') return 0; if (info.size !== undefined) return info.size || 0; const fi = await getFileInfoById(u, info.fileId); return fi.size || 0; });
+    }
+    _lastModifiedDate(pObj, ctx, cb) {
+        const p = this._normalize(pObj);
+        withUser(ctx, cb, async u => { if (p === '/') return Date.now(); const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; if (info.editedTime) return new Date(info.editedTime).getTime(); const fi = await getFileInfoById(u, info.fileId); return new Date(fi.editedTime).getTime(); });
+    }
     _creationDate(pObj, ctx, cb) { this._lastModifiedDate(pObj, ctx, cb); }
-    _openReadStream(pObj, ctx, cb) { const p = pObj.toString(); withUser(ctx, cb, async u => { if (p === '/') throw new Error('Cannot read root'); const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; if (info.mimeType === 'application/vnd.huawei-apps.folder') throw new Error('Cannot read folder'); return await downloadAsStream(u, info.fileId); }); }
-    _create(pObj, ctx, cb) { const p = pObj.toString(), norm = p === '/' ? '/' : p.replace(/\/$/, ''); const type = ctx.type; withUser(ctx, cb, async u => { if (type === webdav.ResourceType.File) { const key = userKey(u); if (!pathCaches[key]) pathCaches[key] = new Map(); pathCaches[key].set(norm, { fileId: 'virtual_' + Date.now(), mimeType: 'application/octet-stream', size: 0, editedTime: new Date().toISOString(), expires: Date.now() + 60000 }); return; } const parent = PATH.posix.dirname(p), folder = PATH.posix.basename(p); const parentInfo = await getFileIdByPath(u, parent); if (!parentInfo || String(parentInfo.fileId).startsWith('virtual_')) throw ERR_NOT_FOUND; await createFolder(u, parentInfo.fileId, folder); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); }); }
+
+    _openReadStream(pObj, ctx, cb) {
+        const p = this._normalize(pObj);
+        withUser(ctx, cb, async u => {
+            if (p === '/') throw new Error('Cannot read root');
+            const info = await getFileIdByPath(u, p);
+            if (!info) throw ERR_NOT_FOUND;
+            if (info.mimeType === 'application/vnd.huawei-apps.folder') throw new Error('Cannot read folder');
+            return await downloadAsStream(u, info.fileId, null);
+        });
+    }
+
+    _create(pObj, ctx, cb) {
+        const p = this._normalize(pObj), norm = p === '/' ? '/' : p.replace(/\/$/, '');
+        const type = ctx.type;
+        withUser(ctx, cb, async u => { if (type === webdav.ResourceType.File) { const key = userKey(u); if (!pathCaches[key]) pathCaches[key] = new Map(); pathCaches[key].set(norm, { fileId: 'virtual_' + Date.now(), mimeType: 'application/octet-stream', size: 0, editedTime: new Date().toISOString(), expires: Date.now() + 60000 }); return; } const parent = PATH.posix.dirname(p), folder = PATH.posix.basename(p); const parentInfo = await getFileIdByPath(u, parent); if (!parentInfo || String(parentInfo.fileId).startsWith('virtual_')) throw ERR_NOT_FOUND; await createFolder(u, parentInfo.fileId, folder); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); });
+    }
     _openWriteStream(pObj, ctx, cb) {
-        const p = pObj.toString(), parent = PATH.posix.dirname(p), fileName = PATH.posix.basename(p);
+        const p = this._normalize(pObj), parent = PATH.posix.dirname(p), fileName = PATH.posix.basename(p);
         const temp = PATH.join(OS.tmpdir(), `upload_${Date.now()}_${Math.random().toString(36).substring(2)}`);
         const fileStream = FS.createWriteStream(temp);
         const writable = new Writable({
@@ -358,8 +413,14 @@ class HuaweiFileSystem extends webdav.FileSystem {
         });
         cb(null, writable);
     }
-    _delete(pObj, ctx, cb) { const p = pObj.toString(); withUser(ctx, cb, async u => { if (p === '/') throw new Error('Cannot delete root'); const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; await deleteFile(u, info.fileId); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); }); }
-    _move(fromObj, toObj, ctx, cb) { const from = fromObj.toString(), to = toObj.toString(); withUser(ctx, cb, async u => { if (from === '/') throw new Error('Cannot move root'); const src = await getFileIdByPath(u, from); if (!src) throw ERR_NOT_FOUND; const destParent = PATH.posix.dirname(to), destName = PATH.posix.basename(to); let destParentId = 'root'; if (destParent !== '/' && destParent !== '.') { const dp = await getFileIdByPath(u, destParent); if (!dp) throw ERR_NOT_FOUND; destParentId = dp.fileId; } let newName = null, newParentId = null; if (destName !== PATH.posix.basename(from)) newName = destName; let curParent = 'root'; try { const fi = await getFileInfoById(u, src.fileId); curParent = fi.parentFolder?.[0] || 'root'; } catch (e) {} if (destParentId !== curParent) newParentId = destParentId; await updateFileMetadata(u, src.fileId, newName, newParentId); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); }); }
+    _delete(pObj, ctx, cb) {
+        const p = this._normalize(pObj);
+        withUser(ctx, cb, async u => { if (p === '/') throw new Error('Cannot delete root'); const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; await deleteFile(u, info.fileId); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); });
+    }
+    _move(fromObj, toObj, ctx, cb) {
+        const from = this._normalize(fromObj), to = this._normalize(toObj);
+        withUser(ctx, cb, async u => { if (from === '/') throw new Error('Cannot move root'); const src = await getFileIdByPath(u, from); if (!src) throw ERR_NOT_FOUND; const destParent = PATH.posix.dirname(to), destName = PATH.posix.basename(to); let destParentId = 'root'; if (destParent !== '/' && destParent !== '.') { const dp = await getFileIdByPath(u, destParent); if (!dp) throw ERR_NOT_FOUND; destParentId = dp.fileId; } let newName = null, newParentId = null; if (destName !== PATH.posix.basename(from)) newName = destName; let curParent = 'root'; try { const fi = await getFileInfoById(u, src.fileId); curParent = fi.parentFolder?.[0] || 'root'; } catch (e) {} if (destParentId !== curParent) newParentId = destParentId; await updateFileMetadata(u, src.fileId, newName, newParentId); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); });
+    }
 }
 
 class AllowAllAuthenticatedPrivilegeManager extends webdav.PrivilegeManager {
@@ -373,16 +434,89 @@ async function startServer() {
     for (let u of usersConfig) try { await refreshToken(u.username); } catch (e) { log(`Token init failed for ${u.username}: ${e.message}`); }
     const userManager = new webdav.SimpleUserManager();
     for (let u of usersConfig) { userManager.addUser(u.username, u.password, false); pathCaches[userKey(u.username)] = new Map(); }
-    serverInstance = new webdav.WebDAVServer({ httpAuthentication: new webdav.HTTPBasicAuthentication(userManager, 'Huawei Cloud WebDAV'), privilegeManager: new AllowAllAuthenticatedPrivilegeManager() });
+    serverInstance = new webdav.WebDAVServer({ 
+        httpAuthentication: new webdav.HTTPBasicAuthentication(userManager, 'Huawei Cloud WebDAV'), 
+        privilegeManager: new AllowAllAuthenticatedPrivilegeManager() 
+    });
     serverInstance.setFileSystem('/', new HuaweiFileSystem());
-    serverInstance.beforeRequest((ctx, next) => { debug(`REQ ${ctx.request.method} ${ctx.request.url} user=${extractUsernameFromCtx(ctx) || 'none'}`); next(); });
+
+    serverInstance.beforeRequest((ctx, next) => {
+        debug(`REQ ${ctx.request.method} ${ctx.request.url} user=${extractUsernameFromCtx(ctx) || 'none'}`);
+        next();
+    });
+
     serverInstance.afterRequest((ctx, next) => { log(`RES ${ctx.request.method} ${ctx.request.url} -> ${ctx.response.statusCode}`); next(); });
-    await new Promise(r => serverInstance.start(WEBDAV_PORT, r));
+
+    httpServer = HTTP.createServer(async (req, res) => {
+        let cleanPath = req.url;
+        try {
+            cleanPath = decodeURIComponent(req.url);
+        } catch (e) {}
+        cleanPath = cleanPath.replace(/^(?:\/https?:\/[^\/]+)+/i, '');
+        if (cleanPath === '' || !cleanPath.startsWith('/')) {
+            cleanPath = '/' + cleanPath;
+        }
+        req.url = encodeURI(cleanPath);
+
+        if (req.method === 'GET') {
+            try {
+                const authHeader = getHeaderCaseInsensitive(req.headers, 'authorization');
+                const username = usernameFromBasicAuthHeader(authHeader);
+                const configUser = username ? findConfigUser(username) : null;
+
+                if (configUser) {
+                    const info = await getFileIdByPath(configUser.username, cleanPath);
+                    if (info && info.mimeType !== 'application/vnd.huawei-apps.folder') {
+                        const range = getHeaderCaseInsensitive(req.headers, 'range');
+                        const resp = await downloadAsStream(configUser.username, info.fileId, range);
+
+                        res.statusCode = resp.statusCode;
+                        for (const key in resp.headers) {
+                            const lowerKey = key.toLowerCase();
+                            if (['content-type', 'content-length', 'content-range', 'accept-ranges', 'content-disposition'].includes(lowerKey)) {
+                                res.setHeader(key, resp.headers[key]);
+                            }
+                        }
+                        res.setHeader('Accept-Ranges', 'bytes');
+                        resp.pipe(res);
+
+                        req.on('close', () => {
+                            resp.destroy();
+                        });
+
+                        log(`DIRECT GET ${req.url} -> ${res.statusCode}`);
+                        return;
+                    }
+                }
+            } catch (e) {
+                debug(`GET intercept error: ${e.message}`);
+                if (!res.headersSent) {
+                    res.statusCode = 500;
+                    res.end('Internal Server Error');
+                }
+                return;
+            }
+        }
+
+        serverInstance.executeRequest(req, res);
+    });
+
+    await new Promise(r => httpServer.listen(WEBDAV_PORT, r));
     isRunning = true;
     console.log(`WebDAV Server started on port ${WEBDAV_PORT}`);
 }
 
-async function stopServer() { if (!isRunning || !serverInstance) return; await new Promise(r => serverInstance.stop(r)); isRunning = false; serverInstance = null; console.log('WebDAV Server stopped'); }
+async function stopServer() {
+    if (!isRunning) return;
+    if (httpServer) {
+        await new Promise(r => httpServer.close(r));
+        httpServer = null;
+    }
+    isRunning = false;
+    serverInstance = null;
+    console.log('WebDAV Server stopped');
+}
+
 async function updateAllHuaweiInfo() { for (let u of usersConfig) { try { const info = await getHuaweiUserInfo(u.token.access_token); if (!info.error) u.huawei = info; } catch (e) {} } saveConfig(); }
 
 async function panel() {
