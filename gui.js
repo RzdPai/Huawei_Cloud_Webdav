@@ -1,7 +1,7 @@
 const FS = require('fs');
 const PATH = require('path');
 const HTTPS = require('https');
-const HTTP = require('http');                    // 新增
+const HTTP = require('http');
 const QS = require('querystring');
 const READLINE = require('readline');
 const OS = require('os');
@@ -26,9 +26,8 @@ const ADMIN_PORT = process.env.ADMIN_PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const ERR_NOT_FOUND = webdav.Errors.ResourceNotFound;
 const ERR_BAD_AUTH = webdav.Errors.BadAuthentication;
-const DEBUG = process.env.DEBUG === '1';          // 默认关闭调试日志
+const DEBUG = process.env.DEBUG === '1';
 
-// 新增 keep-alive agent
 const keepAliveAgent = new HTTPS.Agent({
     keepAlive: true,
     keepAliveMsecs: 15000,
@@ -41,7 +40,7 @@ if (FS.existsSync(CONFIG_FILE)) usersConfig = JSON.parse(FS.readFileSync(CONFIG_
 
 let isRunning = false;
 let serverInstance = null;
-let httpServer = null;                           // 新增 HTTP 服务器引用
+let httpServer = null;
 const pathCaches = {};
 const refreshingTokens = {};
 
@@ -276,7 +275,6 @@ async function updateFileMetadata(username, fileId, newName = null, newParentId 
     await apiJSON(username, 'PATCH', `/drive/v1/files/${fileId}?fields=*`, updates);
 }
 
-// 修改：增加 rangeHeader 参数
 async function downloadAsStream(username, fileId, rangeHeader = null) {
     const make = async (token) => new Promise((resolve, reject) => {
         const headers = { 'Authorization': `Bearer ${token.access_token}` };
@@ -347,7 +345,6 @@ async function uploadStream(username, parentId, fileName, fileSize, tempFilePath
 class HuaweiFileSystem extends webdav.FileSystem {
     constructor() { super(); this.locks = new webdav.LocalLockManager(); this.props = new webdav.LocalPropertyManager(); }
 
-    // 新增路径规范化方法
     _normalize(pObj) {
         let p = pObj.toString();
         try {
@@ -389,7 +386,6 @@ class HuaweiFileSystem extends webdav.FileSystem {
             const info = await getFileIdByPath(u, p);
             if (!info) throw ERR_NOT_FOUND;
             if (info.mimeType === 'application/vnd.huawei-apps.folder') throw new Error('Cannot read folder');
-            // 这里不传 range，由上层 HTTP 处理
             return await downloadAsStream(u, info.fileId, null);
         });
     }
@@ -441,7 +437,14 @@ class HuaweiFileSystem extends webdav.FileSystem {
 }
 
 class AllowAllAuthenticatedPrivilegeManager extends webdav.PrivilegeManager {
-    canAccess(ctx, priv, cb) { cb(null, !!resolveUser(ctx)); }
+    canAccess(ctx, priv, cb) {
+        const username = resolveUser(ctx);
+        if (!username) {
+            cb(ERR_BAD_AUTH);
+        } else {
+            cb(null, true);
+        }
+    }
     setRights(user, path, privs) {}
 }
 
@@ -464,7 +467,6 @@ async function startServer() {
 
     serverInstance.afterRequest((ctx, next) => { log(`RES ${ctx.request.method} ${ctx.request.url} -> ${ctx.response.statusCode}`); next(); });
 
-    // 创建自定义 HTTP 服务器，拦截 GET 请求实现流式传输
     httpServer = HTTP.createServer(async (req, res) => {
         let cleanPath = req.url;
         try {

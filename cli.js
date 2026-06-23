@@ -22,7 +22,7 @@ const LOG_FILE = PATH.join(__dirname, 'webdav.log');
 const WEBDAV_PORT = process.env.PORT || 1900;
 const ERR_NOT_FOUND = webdav.Errors.ResourceNotFound;
 const ERR_BAD_AUTH = webdav.Errors.BadAuthentication;
-const DEBUG = process.env.DEBUG !== '0';
+const DEBUG = process.env.DEBUG === '1';
 
 const keepAliveAgent = new HTTPS.Agent({
     keepAlive: true,
@@ -385,6 +385,7 @@ class HuaweiFileSystem extends webdav.FileSystem {
         const type = ctx.type;
         withUser(ctx, cb, async u => { if (type === webdav.ResourceType.File) { const key = userKey(u); if (!pathCaches[key]) pathCaches[key] = new Map(); pathCaches[key].set(norm, { fileId: 'virtual_' + Date.now(), mimeType: 'application/octet-stream', size: 0, editedTime: new Date().toISOString(), expires: Date.now() + 60000 }); return; } const parent = PATH.posix.dirname(p), folder = PATH.posix.basename(p); const parentInfo = await getFileIdByPath(u, parent); if (!parentInfo || String(parentInfo.fileId).startsWith('virtual_')) throw ERR_NOT_FOUND; await createFolder(u, parentInfo.fileId, folder); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); });
     }
+
     _openWriteStream(pObj, ctx, cb) {
         const p = this._normalize(pObj), parent = PATH.posix.dirname(p), fileName = PATH.posix.basename(p);
         const temp = PATH.join(OS.tmpdir(), `upload_${Date.now()}_${Math.random().toString(36).substring(2)}`);
@@ -413,10 +414,12 @@ class HuaweiFileSystem extends webdav.FileSystem {
         });
         cb(null, writable);
     }
+
     _delete(pObj, ctx, cb) {
         const p = this._normalize(pObj);
         withUser(ctx, cb, async u => { if (p === '/') throw new Error('Cannot delete root'); const info = await getFileIdByPath(u, p); if (!info) throw ERR_NOT_FOUND; await deleteFile(u, info.fileId); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); });
     }
+
     _move(fromObj, toObj, ctx, cb) {
         const from = this._normalize(fromObj), to = this._normalize(toObj);
         withUser(ctx, cb, async u => { if (from === '/') throw new Error('Cannot move root'); const src = await getFileIdByPath(u, from); if (!src) throw ERR_NOT_FOUND; const destParent = PATH.posix.dirname(to), destName = PATH.posix.basename(to); let destParentId = 'root'; if (destParent !== '/' && destParent !== '.') { const dp = await getFileIdByPath(u, destParent); if (!dp) throw ERR_NOT_FOUND; destParentId = dp.fileId; } let newName = null, newParentId = null; if (destName !== PATH.posix.basename(from)) newName = destName; let curParent = 'root'; try { const fi = await getFileInfoById(u, src.fileId); curParent = fi.parentFolder?.[0] || 'root'; } catch (e) {} if (destParentId !== curParent) newParentId = destParentId; await updateFileMetadata(u, src.fileId, newName, newParentId); const key = userKey(u); if (pathCaches[key]) pathCaches[key].clear(); });
@@ -424,7 +427,14 @@ class HuaweiFileSystem extends webdav.FileSystem {
 }
 
 class AllowAllAuthenticatedPrivilegeManager extends webdav.PrivilegeManager {
-    canAccess(ctx, priv, cb) { cb(null, !!resolveUser(ctx)); }
+    canAccess(ctx, priv, cb) {
+        const username = resolveUser(ctx);
+        if (!username) {
+            cb(ERR_BAD_AUTH);
+        } else {
+            cb(null, true);
+        }
+    }
     setRights(user, path, privs) {}
 }
 
@@ -434,9 +444,9 @@ async function startServer() {
     for (let u of usersConfig) try { await refreshToken(u.username); } catch (e) { log(`Token init failed for ${u.username}: ${e.message}`); }
     const userManager = new webdav.SimpleUserManager();
     for (let u of usersConfig) { userManager.addUser(u.username, u.password, false); pathCaches[userKey(u.username)] = new Map(); }
-    serverInstance = new webdav.WebDAVServer({ 
-        httpAuthentication: new webdav.HTTPBasicAuthentication(userManager, 'Huawei Cloud WebDAV'), 
-        privilegeManager: new AllowAllAuthenticatedPrivilegeManager() 
+    serverInstance = new webdav.WebDAVServer({
+        httpAuthentication: new webdav.HTTPBasicAuthentication(userManager, 'Huawei Cloud WebDAV'),
+        privilegeManager: new AllowAllAuthenticatedPrivilegeManager()
     });
     serverInstance.setFileSystem('/', new HuaweiFileSystem());
 
