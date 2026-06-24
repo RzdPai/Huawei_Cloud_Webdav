@@ -452,6 +452,13 @@ async function startServer() {
 
     serverInstance.beforeRequest((ctx, next) => {
         debug(`REQ ${ctx.request.method} ${ctx.request.url} user=${extractUsernameFromCtx(ctx) || 'none'}`);
+        const url = ctx.request.url;
+        if (url !== '/' && !url.endsWith('/') && ctx.request.method !== 'GET') {
+            const ext = PATH.extname(url);
+            if (!ext) {
+                ctx.request.url = url + '/';
+            }
+        }
         next();
     });
 
@@ -459,14 +466,25 @@ async function startServer() {
 
     httpServer = HTTP.createServer(async (req, res) => {
         let cleanPath = req.url;
+        let search = '';
         try {
-            cleanPath = decodeURIComponent(req.url);
-        } catch (e) {}
+            const urlObj = new URL(req.url, `http://${req.headers.host}`);
+            cleanPath = urlObj.pathname;
+            search = urlObj.search || '';
+        } catch (e) {
+            const idx = req.url.indexOf('?');
+            if (idx !== -1) {
+                cleanPath = req.url.slice(0, idx);
+                search = req.url.slice(idx);
+            } else {
+                cleanPath = req.url;
+            }
+        }
         cleanPath = cleanPath.replace(/^(?:\/https?:\/[^\/]+)+/i, '');
         if (cleanPath === '' || !cleanPath.startsWith('/')) {
             cleanPath = '/' + cleanPath;
         }
-        req.url = encodeURI(cleanPath);
+        req.url = encodeURI(cleanPath) + search;
 
         if (req.method === 'GET') {
             try {
